@@ -66,13 +66,16 @@
   },
   "formation": {
     "web": {
-      "quantity": 1
+      "quantity": 1,
+      "size": "standard-1x"
     },
     "worker": {
-      "quantity": 1
+      "quantity": 1,
+      "size": "standard-1x"
     },
     "worker-short": {
-      "quantity": 1
+      "quantity": 1,
+      "size": "standard-1x"
     }
   },
   "stack": "heroku-18",
