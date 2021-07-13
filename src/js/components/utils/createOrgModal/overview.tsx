@@ -43,6 +43,11 @@ const Overview = ({
         <br />
         You will be able to access your org from this {{ type }} page.
       </p>
+    </Trans>
+  );
+
+  const cannotContributeWarning = (
+    <Trans i18nKey="createScratchOrgContributeWarning">
       <p>
         <strong>
           You will not be able to retrieve any changes made in this Scratch Org.
@@ -81,6 +86,9 @@ const Overview = ({
             </p>
           </Trans>
         )}
+        {isProject || !project.has_push_permission
+          ? cannotContributeWarning
+          : null}
       </div>
     </div>
   );

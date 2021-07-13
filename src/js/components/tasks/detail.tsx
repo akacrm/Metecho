@@ -1,7 +1,3 @@
-// For some reason Eslint is getting confused about `useCallback` being used
-// after conditional variable declarations (e.g. `"foo" || "bar"`)...
-/* eslint-disable react-hooks/rules-of-hooks */
-
 import Button from '@salesforce/design-system-react/components/button';
 import PageHeaderControl from '@salesforce/design-system-react/components/page-header/control';
 import classNames from 'classnames';
@@ -23,9 +19,12 @@ import TaskOrgCards, {
 } from '~js/components/orgs/taskOrgCards';
 import { Step } from '~js/components/steps/stepsItem';
 import CaptureModal from '~js/components/tasks/capture';
+import CreateTaskModal from '~js/components/tasks/createForm';
 import TaskStatusPath from '~js/components/tasks/path';
 import TaskStatusSteps from '~js/components/tasks/steps';
+import TourPopover from '~js/components/tour/popover';
 import {
+  ContributeWorkModal,
   CreateOrgModal,
   DeleteModal,
   DetailPageLayout,
@@ -45,7 +44,7 @@ import {
   useIsMounted,
 } from '~js/components/utils';
 import { AppState, ThunkDispatch } from '~js/store';
-import { createObject } from '~js/store/actions';
+import { createObject, updateObject } from '~js/store/actions';
 import { refetchOrg, refreshOrg } from '~js/store/orgs/actions';
 import { Org, OrgsByParent } from '~js/store/orgs/reducer';
 import { selectProjectCollaborator } from '~js/store/projects/selectors';
@@ -57,6 +56,7 @@ import {
   OBJECT_TYPES,
   ORG_TYPES,
   OrgTypes,
+  RETRIEVE_CHANGES,
   REVIEW_STATUSES,
   TASK_STATUSES,
 } from '~js/utils/constants';
@@ -82,7 +82,9 @@ const ResubmitButton = ({
   return <>{children}</>;
 };
 
-const TaskDetail = (props: RouteComponentProps) => {
+const TaskDetail = (
+  props: RouteComponentProps<any, any, { [RETRIEVE_CHANGES]?: boolean }>,
+) => {
   const [fetchingChanges, setFetchingChanges] = useState(false);
   const [captureModalOpen, setCaptureModalOpen] = useState(false);
   const [submitModalOpen, setSubmitModalOpen] = useState(false);
@@ -95,6 +97,8 @@ const TaskDetail = (props: RouteComponentProps) => {
     ORG_TYPE_TRACKER_DEFAULT,
   );
   const [submitReviewModalOpen, setSubmitReviewModalOpen] = useState(false);
+  const [contributeModalOpen, setContributeModalOpen] = useState(false);
+  const [createModalOrgId, setCreateModalOrgId] = useState<string | null>(null);
   const isMounted = useIsMounted();
 
   const { project, projectSlug } = useFetchProjectIfMissing(props);
@@ -117,10 +121,15 @@ const TaskDetail = (props: RouteComponentProps) => {
   const qaUser = useSelector((state: AppState) =>
     selectProjectCollaborator(state, project?.id, task?.assigned_qa),
   );
+  const {
+    history,
+    location: { state },
+  } = props;
 
   const readyToSubmit = Boolean(
     task?.has_unmerged_commits && !task?.pr_is_open,
   );
+  const taskIsMerged = task?.status === TASK_STATUSES.COMPLETED;
   const currentlySubmitting = Boolean(task?.currently_creating_pr);
   const userIsAssignedDev = Boolean(user.github_id === task?.assigned_dev);
   const userIsAssignedTester = Boolean(user.github_id === task?.assigned_qa);
@@ -215,6 +224,9 @@ const TaskDetail = (props: RouteComponentProps) => {
     setEditModalOpen(false);
     setDeleteModalOpen(false);
     setCreateOrgModalOpen(false);
+    setAssignUserModalOpen(null);
+    setContributeModalOpen(false);
+    setCreateModalOrgId(null);
   };
   const closeSubmitReviewModal = () => {
     setSubmitReviewModalOpen(false);
@@ -226,6 +238,9 @@ const TaskDetail = (props: RouteComponentProps) => {
     setEditModalOpen(false);
     setDeleteModalOpen(false);
     setCreateOrgModalOpen(false);
+    setAssignUserModalOpen(null);
+    setContributeModalOpen(false);
+    setCreateModalOrgId(null);
   };
   const closeCaptureModal = () => {
     setCaptureModalOpen(false);
@@ -237,6 +252,9 @@ const TaskDetail = (props: RouteComponentProps) => {
     setEditModalOpen(false);
     setDeleteModalOpen(false);
     setCreateOrgModalOpen(false);
+    setAssignUserModalOpen(null);
+    setContributeModalOpen(false);
+    setCreateModalOrgId(null);
   };
   // edit modal related...
   const openEditModal = () => {
@@ -246,6 +264,9 @@ const TaskDetail = (props: RouteComponentProps) => {
     setCaptureModalOpen(false);
     setDeleteModalOpen(false);
     setCreateOrgModalOpen(false);
+    setAssignUserModalOpen(null);
+    setContributeModalOpen(false);
+    setCreateModalOrgId(null);
   };
   const closeEditModal = () => {
     setEditModalOpen(false);
@@ -258,6 +279,9 @@ const TaskDetail = (props: RouteComponentProps) => {
     setSubmitModalOpen(false);
     setCaptureModalOpen(false);
     setCreateOrgModalOpen(false);
+    setAssignUserModalOpen(null);
+    setContributeModalOpen(false);
+    setCreateModalOrgId(null);
   };
   const closeDeleteModal = () => {
     setDeleteModalOpen(false);
@@ -272,6 +296,8 @@ const TaskDetail = (props: RouteComponentProps) => {
     setEditModalOpen(false);
     setDeleteModalOpen(false);
     setCreateOrgModalOpen(false);
+    setContributeModalOpen(false);
+    setCreateModalOrgId(null);
   };
   const closeAssignUserModal = () => {
     setAssignUserModalOpen(null);
@@ -285,9 +311,44 @@ const TaskDetail = (props: RouteComponentProps) => {
     setSubmitModalOpen(false);
     setCaptureModalOpen(false);
     setDeleteModalOpen(false);
+    setAssignUserModalOpen(null);
+    setContributeModalOpen(false);
+    setCreateModalOrgId(null);
   };
   const closeCreateOrgModal = () => {
     setCreateOrgModalOpen(false);
+  };
+
+  // "contribute work" modal related:
+  const openContributeModal = () => {
+    setContributeModalOpen(true);
+    setSubmitReviewModalOpen(false);
+    setCaptureModalOpen(false);
+    setSubmitModalOpen(false);
+    setEditModalOpen(false);
+    setDeleteModalOpen(false);
+    setCreateOrgModalOpen(false);
+    setAssignUserModalOpen(null);
+    setCreateModalOrgId(null);
+  };
+  const closeContributeModal = useCallback(() => {
+    setContributeModalOpen(false);
+  }, []);
+
+  // "create task" modal related:
+  const openCreateModal = useCallback((orgId: string) => {
+    setCreateModalOrgId(orgId);
+    setContributeModalOpen(false);
+    setSubmitReviewModalOpen(false);
+    setCaptureModalOpen(false);
+    setSubmitModalOpen(false);
+    setEditModalOpen(false);
+    setDeleteModalOpen(false);
+    setCreateOrgModalOpen(false);
+    setAssignUserModalOpen(null);
+  }, []);
+  const closeCreateModal = () => {
+    setCreateModalOrgId(null);
   };
 
   const doRefetchOrg = useCallback(
@@ -359,6 +420,48 @@ const TaskDetail = (props: RouteComponentProps) => {
       }
     }
   }, [devOrg, doRefetchOrg, orgHasChanges]);
+
+  const doContributeFromScratchOrg = useCallback(
+    ({ id, useExistingTask }: { id: string; useExistingTask: boolean }) => {
+      closeContributeModal();
+      if (!useExistingTask) {
+        openCreateModal(id);
+      } /* istanbul ignore else */ else if (!devOrg) {
+        /* istanbul ignore else */
+        if (!userIsAssignedDev) {
+          // Assign current user as Dev
+          dispatch(
+            updateObject({
+              objectType: OBJECT_TYPES.TASK,
+              url: window.api_urls.task_assignees(task?.id),
+              data: {
+                assigned_dev: user.github_id,
+              },
+            }),
+          );
+        }
+        // Convert Scratch Org to Dev Org
+        dispatch(
+          updateObject({
+            objectType: OBJECT_TYPES.ORG,
+            url: window.api_urls.scratch_org_detail(id),
+            data: { org_type: ORG_TYPES.DEV },
+            patch: true,
+          }),
+        );
+        history.replace({ state: { [RETRIEVE_CHANGES]: true } });
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      closeContributeModal,
+      openCreateModal,
+      devOrg,
+      task?.id,
+      user.github_id,
+      userIsAssignedDev,
+    ],
+  );
 
   const handleStepAction = useCallback(
     (step: Step) => {
@@ -440,6 +543,26 @@ const TaskDetail = (props: RouteComponentProps) => {
     ],
   );
 
+  // Auto-open the retrieve-changes modal if `RETRIEVE_CHANGES` param is truthy
+  const shouldRetrieve = state?.[RETRIEVE_CHANGES];
+  useEffect(() => {
+    if (
+      shouldRetrieve &&
+      readyToCaptureChanges &&
+      project?.has_push_permission
+    ) {
+      // Remove location state
+      history.replace({ state: {} });
+      doCaptureChanges();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    doCaptureChanges,
+    project?.has_push_permission,
+    readyToCaptureChanges,
+    shouldRetrieve,
+  ]);
+
   // When capture changes has been triggered, wait until org has been refreshed
   useEffect(() => {
     const changesFetched =
@@ -520,29 +643,45 @@ const TaskDetail = (props: RouteComponentProps) => {
     }
   };
 
-  const { branchLink, branchLinkText } = getBranchLink(task);
+  const { branchLink, branchLinkText, popover } = getBranchLink(task, 'task');
   const onRenderHeaderActions = () => (
     <PageHeaderControl>
       {project.has_push_permission && (
-        <PageOptions
-          modelType={OBJECT_TYPES.TASK}
-          handleOptionSelect={handlePageOptionSelect}
-        />
+        <div className="slds-is-relative inline-container">
+          <PageOptions
+            modelType={OBJECT_TYPES.TASK}
+            handleOptionSelect={handlePageOptionSelect}
+          />
+          <TourPopover
+            align="left"
+            heading={i18n.t('Edit or delete this Task')}
+            body={
+              <Trans i18nKey="tourEditTask">
+                Here you can change the name and description of this Task. You
+                can also delete the Task. Deleting a Task deletes all the Orgs
+                in the Task as well.
+              </Trans>
+            }
+          />
+        </div>
       )}
       {branchLink && (
-        <ExternalLink
-          url={branchLink}
-          showButtonIcon
-          className="slds-button slds-button_outline-brand"
-        >
-          {branchLinkText}
-        </ExternalLink>
+        <div className="slds-is-relative inline-container">
+          <ExternalLink
+            url={branchLink}
+            showButtonIcon
+            className="slds-button slds-button_outline-brand"
+          >
+            {branchLinkText}
+          </ExternalLink>
+          {popover}
+        </div>
       )}
     </PageHeaderControl>
   );
 
   let submitButton: React.ReactNode = null;
-  if (readyToSubmit && project.has_push_permission) {
+  if (readyToSubmit && project.has_push_permission && !taskIsMerged) {
     const isPrimary = !readyToCaptureChanges;
     const submitButtonText = currentlySubmitting ? (
       <LabelWithSpinner
@@ -553,19 +692,34 @@ const TaskDetail = (props: RouteComponentProps) => {
       i18n.t('Submit Task for Testing')
     );
     submitButton = (
-      <Button
-        label={submitButtonText}
-        className="slds-m-bottom_x-large slds-m-left_none"
-        variant={isPrimary ? 'brand' : 'outline-brand'}
-        onClick={openSubmitModal}
-        disabled={currentlySubmitting}
-      />
+      <div className="slds-is-relative">
+        <Button
+          label={submitButtonText}
+          className="slds-m-bottom_x-large slds-m-left_none"
+          variant={isPrimary ? 'brand' : 'outline-brand'}
+          onClick={openSubmitModal}
+          disabled={currentlySubmitting}
+        />
+        <TourPopover
+          align="top left"
+          heading={i18n.t('Submit changes for testing')}
+          body={
+            <Trans i18nKey="tourTaskSubmit">
+              When the work is complete, it’s time to submit the changes so that
+              the person assigned as the Tester can access them for testing.
+              Developers can retrieve new changes as many times as needed before
+              submitting changes for testing.
+            </Trans>
+          }
+        />
+      </div>
     );
   }
 
   let captureButton: React.ReactNode = null;
   if (
     project.has_push_permission &&
+    !taskIsMerged &&
     (readyToCaptureChanges || orgHasBeenVisited)
   ) {
     let captureButtonText: JSX.Element = i18n.t(
@@ -602,20 +756,35 @@ const TaskDetail = (props: RouteComponentProps) => {
       captureButtonText = i18n.t('Retrieve Changes from Dev Org');
     }
     captureButton = (
-      <Button
-        label={captureButtonText}
-        className={classNames('slds-m-bottom_x-large', {
-          'slds-m-right_medium': readyToSubmit,
-        })}
-        variant={isPrimary ? 'brand' : 'outline-brand'}
-        onClick={doCaptureChanges}
-        disabled={
-          fetchingChanges ||
-          currentlyFetching ||
-          currentlyCommitting ||
-          currentlyReassigning
-        }
-      />
+      <div className="slds-is-relative">
+        <Button
+          label={captureButtonText}
+          className={classNames('slds-m-bottom_x-large', {
+            'slds-m-right_medium': readyToSubmit,
+          })}
+          variant={isPrimary ? 'brand' : 'outline-brand'}
+          onClick={doCaptureChanges}
+          disabled={
+            fetchingChanges ||
+            currentlyFetching ||
+            currentlyCommitting ||
+            currentlyReassigning
+          }
+        />
+        <TourPopover
+          align="right"
+          heading={i18n.t('Retrieve changes')}
+          body={
+            <Trans i18nKey="tourTaskRetrieve">
+              After you’ve made changes, come back to Metecho to save or
+              “retrieve” your changes. You will be asked to select which changes
+              to retrieve (or ignore). You will create a “commit” message
+              summarizing your changes, so other Collaborators know what was
+              changed.
+            </Trans>
+          }
+        />
+      </div>
     );
   }
 
@@ -640,7 +809,22 @@ const TaskDetail = (props: RouteComponentProps) => {
       )}`}
     >
       <DetailPageLayout
+        type={OBJECT_TYPES.TASK}
         title={task.name}
+        titlePopover={
+          <TourPopover
+            align="bottom left"
+            heading={i18n.t('Task name & GitHub link')}
+            body={
+              <Trans i18nKey="tourTaskName">
+                This is the name of the Task you are viewing. Select the link
+                below to leave Metecho and access this branch on GitHub. To edit
+                this name, click the gear icon. Epics and Tasks are equivalent
+                to GitHub branches.
+              </Trans>
+            }
+          />
+        }
         description={task.description_rendered}
         headerUrl={headerUrl}
         headerUrlText={headerUrlText}
@@ -658,11 +842,36 @@ const TaskDetail = (props: RouteComponentProps) => {
         onRenderHeaderActions={onRenderHeaderActions}
         sidebar={
           <>
-            <div className="slds-m-bottom_x-large metecho-secondary-block">
+            <div
+              className="slds-m-bottom_x-large
+                metecho-secondary-block
+                slds-is-relative"
+            >
               <TaskStatusPath task={task} />
+              <TourPopover
+                align="left"
+                heading={i18n.t('Task progress path')}
+                body={
+                  <Trans i18nKey="tourTaskPath">
+                    A Task starts its journey as <b>Planned</b>. When a Dev Org
+                    is created, the Task is <b>In Progress</b>, and the
+                    Developer begins work. When the Developer submits changes
+                    for testing, the Task moves to <b>Test</b>. If the Developer
+                    retrieves new changes, the Task is again <b>In Progress</b>.
+                    The Task is ready to be <b>Merged</b> after the Tester
+                    approves the work, and is <b>Complete</b> when the Task has
+                    been added to the Project on GitHub.
+                  </Trans>
+                }
+              />
             </div>
-            {taskOrgs && task.status !== TASK_STATUSES.COMPLETED ? (
-              <div className="slds-m-bottom_x-large metecho-secondary-block">
+            {taskOrgs && !taskIsMerged ? (
+              <div
+                className="slds-m-bottom_x-large
+                  metecho-secondary-block
+                  slds-is-relative
+                  heading"
+              >
                 {task.status === TASK_STATUSES.CANCELED ? (
                   <>
                     <h3 className="slds-text-heading_medium slds-m-bottom_small">
@@ -688,15 +897,33 @@ const TaskDetail = (props: RouteComponentProps) => {
                     </p>
                   </>
                 ) : (
-                  <TaskStatusSteps
-                    task={task}
-                    orgs={taskOrgs}
-                    user={user}
-                    projectId={project.id}
-                    hasPermissions={project.has_push_permission}
-                    isCreatingOrg={isCreatingOrg}
-                    handleAction={handleStepAction}
-                  />
+                  <>
+                    <TaskStatusSteps
+                      task={task}
+                      orgs={taskOrgs}
+                      user={user}
+                      projectId={project.id}
+                      hasPermissions={project.has_push_permission}
+                      isCreatingOrg={isCreatingOrg}
+                      handleAction={handleStepAction}
+                    />
+                    <TourPopover
+                      align="top"
+                      heading={i18n.t('Wondering what to do next?')}
+                      body={
+                        <Trans i18nKey="tourTaskNextSteps">
+                          The Next Steps section is designed as a quick
+                          reference to guide you through the process from
+                          assigning a Developer to getting your work added to
+                          the Project on GitHub. The next step is indicated with
+                          a blue ring, and completed steps are checked. You can
+                          assign a Tester at any time. Many steps become a link
+                          when they are active, giving you a shortcut to take
+                          the next action.
+                        </Trans>
+                      }
+                    />
+                  </>
                 )}
               </div>
             ) : null}
@@ -726,13 +953,25 @@ const TaskDetail = (props: RouteComponentProps) => {
             openSubmitReviewModal={openSubmitReviewModal}
             testOrgReadyForReview={testOrgReadyForReview}
             testOrgSubmittingReview={testOrgSubmittingReview}
+            convertingOrg={Boolean(shouldRetrieve)}
             doCreateOrg={doCreateOrg}
             doRefreshOrg={doRefreshOrg}
           />
         ) : (
           <SpinnerWrapper />
         )}
-        <div className="slds-m-vertical_large">
+        <div className="slds-m-vertical_large slds-is-relative heading">
+          <TourPopover
+            align="top left"
+            heading={i18n.t('View & play with a Task')}
+            body={
+              <Trans i18nKey="tourTaskStratchOrg">
+                Your Scratch Org is a temporary place for you to view the work
+                on this Task. You can also use a Scratch Org to play with
+                changes to the Task without affecting the Task.
+              </Trans>
+            }
+          />
           <h2 className="slds-text-heading_medium slds-p-bottom_medium">
             {i18n.t('My Task Scratch Org')}
           </h2>
@@ -753,6 +992,9 @@ const TaskDetail = (props: RouteComponentProps) => {
                       org={playgroundOrg}
                       task={task}
                       repoUrl={project.repo_url}
+                      openContributeModal={
+                        taskIsMerged ? undefined : openContributeModal
+                      }
                     />
                   </div>
                 </div>
@@ -832,6 +1074,26 @@ const TaskDetail = (props: RouteComponentProps) => {
           isOpen={createOrgModalOpen}
           closeModal={closeCreateOrgModal}
         />
+        {playgroundOrg && !taskIsMerged ? (
+          <>
+            <ContributeWorkModal
+              task={task}
+              isOpen={contributeModalOpen}
+              hasPermissions={project.has_push_permission}
+              orgId={playgroundOrg.id}
+              hasDevOrg={Boolean(devOrg)}
+              closeModal={closeContributeModal}
+              doContribute={doContributeFromScratchOrg}
+            />
+            <CreateTaskModal
+              project={project}
+              epic={epic}
+              isOpenOrOrgId={createModalOrgId}
+              playgroundOrg={playgroundOrg}
+              closeCreateModal={closeCreateModal}
+            />
+          </>
+        ) : null}
         <CommitList commits={task.commits} />
       </DetailPageLayout>
     </DocumentTitle>
