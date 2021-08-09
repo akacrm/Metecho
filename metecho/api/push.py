@@ -4,10 +4,12 @@ Websocket notifications you can subscribe to:
     user.:id
         BACKEND_ERROR
         USER_REPOS_REFRESH
+        USER_REPOS_ERROR
 
     project.:id
         PROJECT_UPDATE
         PROJECT_UPDATE_ERROR
+        SCRATCH_ORG_PROVISIONING
 
     epic.:id
         EPIC_UPDATE
