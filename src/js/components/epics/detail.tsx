@@ -65,7 +65,7 @@ const EpicDetail = (
     { project },
     props,
   );
-  const { tasks } = useFetchEpicTasksIfMissing(
+  const { tasks, next, count } = useFetchEpicTasksIfMissing(
     { projectId: project?.id, epicId: epic?.id },
     props,
   );
@@ -496,7 +496,7 @@ const EpicDetail = (
         </div>
       )}
       {branchLink && (
-        <div className="slds-is-relative inline-container">
+        <div className="slds-is-relative inline-container slds-m-left_x-small">
           <ExternalLink
             url={branchLink}
             showButtonIcon
@@ -630,6 +630,7 @@ const EpicDetail = (
               />
               {epicCollaborators.length ? (
                 <UserCards
+                  className="slds-m-top_large"
                   users={epicCollaborators}
                   userId={currentUser.github_id}
                   canRemoveUser={project.has_push_permission}
@@ -783,7 +784,10 @@ const EpicDetail = (
                   projectId={project.id}
                   projectSlug={project.slug}
                   tasks={tasks}
+                  next={next}
+                  count={count}
                   isFetched
+                  epicId={epic.id}
                   epicUsers={epicCollaborators}
                   githubUsers={project.github_users}
                   canAssign={project.has_push_permission}
