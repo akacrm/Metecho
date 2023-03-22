@@ -7,7 +7,7 @@ from typing import NamedTuple, Sequence
 from unittest.mock import MagicMock, patch
 
 import pytest
-from cumulusci.salesforce_api.org_schema import Field, SObject
+from cumulusci.salesforce_api.org_schema import Field, SObject, Schema
 from django.utils.timezone import now
 from github3.exceptions import NotFoundError, UnprocessableEntity
 from github3.orgs import Organization
@@ -1560,6 +1560,7 @@ class FakeFieldSchema(NamedTuple):
     nillable: bool
     referenceTo: Sequence[str] = ()
     defaultedOnCreate: bool = False
+    defaultValue = None
 
     @property
     def label(self):
@@ -1585,7 +1586,9 @@ class FakeSObjectSchema:
     extractable = SObject.extractable
 
 
-class FakeSchema:
+class FakeSchema(Schema):
+    def __init__(self):
+        pass
 
     includes_counts = True
     sobjects = [
@@ -1624,8 +1627,9 @@ class FakeSchema:
 def patch_dataset_env(mocker, tmp_path):
     """Mock all values returned by SF and GH APIs in the `dataset_env` context manager"""
     repo = mocker.MagicMock()
+    instance_url = "https://chocolate-cappuccino-8174-dev-ed.scratch.my.salesforce.com"
     project_config = mocker.MagicMock(repo_root=str(tmp_path))
-    org_config = mocker.MagicMock()
+    org_config = mocker.MagicMock(instance_url=instance_url)
     sf = mocker.MagicMock()
     schema = FakeSchema()
 
@@ -1842,6 +1846,7 @@ class TestCommitDatasetFromOrg:
 
         assert not scratch_org.currently_retrieving_dataset
         assert commit.called
+        assert scratch_org.task.has_unmerged_commits is True
 
     def test_exception(self, mocker, caplog, scratch_org_factory):
         mocker.patch(
@@ -1911,6 +1916,7 @@ class TestCommitOmnistudioFromOrg:
         assert not scratch_org.currently_retrieving_omnistudio
         assert commit.called
         assert vlocity_task.called
+        assert scratch_org.task.has_unmerged_commits is True
 
     def test_exception__no_file(
         self, mocker, caplog, scratch_org_factory, patch_dataset_env
