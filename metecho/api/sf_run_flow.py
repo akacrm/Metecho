@@ -104,7 +104,7 @@ def is_org_good(org):
     org_name = org.org_config_name
     try:
         org_config = OrgConfig(config, org_name)
-        org_config.refresh_oauth_token(None)
+        org_config.refresh_oauth_token(None, is_sandbox=True)
         return "access_token" in org_config.config
     except Exception:
         return False
@@ -131,7 +131,7 @@ def refresh_access_token(
         return org_config
 
 
-def get_devhub_api(*, devhub_username, scratch_org=None):
+def get_devhub_api(*, devhub_username, scratch_org=None) -> SimpleSalesforce:
     """
     Get an access token (session) for the specified dev hub username.
     This only works if the user has already authorized the connected app
