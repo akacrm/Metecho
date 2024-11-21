@@ -1,3 +1,4 @@
+import concurrent.futures
 import contextlib
 import logging
 import string
@@ -26,8 +27,12 @@ from cumulusci.core.runtime import BaseCumulusCI
 from cumulusci.salesforce_api.org_schema import Field, Filters, Schema, get_org_schema
 from cumulusci.salesforce_api.utils import get_simple_salesforce_connection
 from cumulusci.tasks.github.util import CommitDir
+from cumulusci.tasks.salesforce.nonsourcetracking import (
+    ListComponents,
+    ListNonSourceTrackable,
+)
 from cumulusci.tasks.vlocity.vlocity import VlocityRetrieveTask
-from cumulusci.utils import download_extract_github, temporary_dir
+from cumulusci.utils import temporary_dir
 from cumulusci.utils.http.requests_utils import safe_json_from_response
 from django.conf import settings
 from django.db import transaction
@@ -241,67 +246,94 @@ def create_repository(
             team.add_or_update_membership(login, role=role)
 
         # Create repo on GitHub
-        repo = org.create_repository(
-            project.repo_name, description=project.description, private=False
-        )
-        team.add_repository(repo.full_name, permission="push")
-        project.repo_id = repo.id
+        if tpl_repo:
+            # Calling rest api to generate repo using github template repo
+            gh_token = org_gh.session.auth.token
+            # Extract data from the request body
 
-        with temporary_dir():
-            # Populate files from the template repository
-            if tpl_repo:
-                zipfile = download_extract_github(org_gh, tpl_repo.owner, tpl_repo.name)
-                zipfile.extractall()
+            # GitHub API endpoint URL for repository creation
+            api_url = f"https://api.github.com/repos/{tpl_repo.owner}/{tpl_repo.name}/generate"
 
-            runtime = CliRuntime()
-
-            try:
-                # Ask the user's Dev Hub what its latest API version is
-                sf = get_devhub_api(devhub_username=user.sf_username)
-                response = requests.get(
-                    f"https://{sf.sf_instance}/services/data", headers=sf.headers
-                )
-
-                version = safe_json_from_response(response)[-1]["version"]
-            except Exception:
-                version = runtime.universal_config.project__package__api_version
-
-            # Bootstrap repository with CumulusCI
-            context = {
-                "cci_version": cumulusci.__version__,
-                "project_name": project.repo_name,
-                "package_name": project.repo_name,
-                "package_namespace": None,
-                "api_version": version,
-                "source_format": "sfdx",
-                "dependencies": [
-                    {"type": "github", "url": url} for url in dependencies
-                ],
-                "git": {
-                    "default_branch": branch_name,
-                    "prefix_feature": "feature/",
-                    "prefix_beta": "beta/",
-                    "prefix_release": "release/",
-                },
-                "test_name_match": None,
-                "code_coverage": 75,
+            # Headers for the GitHub API request
+            headers = {
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {gh_token}",  # Extract GitHub token from request data
             }
-            init_from_context(context)
-            cmd = sarge.capture_both(
-                f"""
-                git init;
-                git checkout -b {branch_name};
-                git config user.name '{user.get_full_name() or user.username}';
-                git config user.email '{user.email}';
-                git add --all;
-                git commit -m 'Bootstrap project (via Metecho)';
-                git push https://{user_gh.session.auth.token}@github.com/{repo.full_name}.git {branch_name};
-                """,  # noqa: B950
-                shell=True,
+
+            # Data to be sent in the POST request to GitHub API
+            github_data = {
+                "owner": project.repo_owner,
+                "name": project.repo_name,
+                "description": project.description,
+                "include_all_branches": False,
+                "private": settings.ENABLE_CREATE_PRIVATE_REPO,
+            }
+            # Sending a POST request to GitHub API
+            response = requests.post(api_url, headers=headers, json=github_data)
+            team.add_repository(response.json()["full_name"], permission="push")
+            project.repo_id = response.json()["id"]
+            # Checking the response status code and returning the response
+            if response.status_code != 201:
+                raise Exception("Create Repository using Template failed")
+
+        else:
+            repo = org.create_repository(
+                project.repo_name,
+                description=project.description,
+                private=settings.ENABLE_CREATE_PRIVATE_REPO,
             )
-            if cmd.returncode:  # non-zero return code, something's wrong
-                logger.error(cmd.stderr.text)
-                raise Exception("Failed to push files to GitHub repository")
+            team.add_repository(repo.full_name, permission="push")
+            project.repo_id = repo.id
+            with temporary_dir():
+
+                runtime = CliRuntime()
+                try:
+                    # Ask the user's Dev Hub what its latest API version is
+                    sf = get_devhub_api(devhub_username=user.sf_username)
+                    response = requests.get(
+                        f"https://{sf.sf_instance}/services/data", headers=sf.headers
+                    )
+
+                    version = safe_json_from_response(response)[-1]["version"]
+                except Exception:
+                    version = runtime.universal_config.project__package__api_version
+
+                # Bootstrap repository with CumulusCI
+                context = {
+                    "cci_version": cumulusci.__version__,
+                    "project_name": project.repo_name,
+                    "package_name": project.repo_name,
+                    "package_namespace": None,
+                    "api_version": version,
+                    "source_format": "sfdx",
+                    "dependencies": [
+                        {"type": "github", "url": url} for url in dependencies
+                    ],
+                    "git": {
+                        "default_branch": branch_name,
+                        "prefix_feature": "feature/",
+                        "prefix_beta": "beta/",
+                        "prefix_release": "release/",
+                    },
+                    "test_name_match": None,
+                    "code_coverage": 75,
+                }
+                init_from_context(context)
+                cmd = sarge.capture_both(
+                    f"""
+                    git init;
+                    git checkout -b {branch_name};
+                    git config user.name '{user.get_full_name() or user.username}';
+                    git config user.email '{user.email}';
+                    git add --all;
+                    git commit -m 'Bootstrap project (via Metecho)';
+                    git push https://{user_gh.session.auth.token}@github.com/{repo.full_name}.git {branch_name};
+                    """,  # noqa: B950
+                    shell=True,
+                )
+                if cmd.returncode:  # non-zero return code, something's wrong
+                    logger.error(cmd.stderr.text)
+                    raise Exception("Failed to push files to GitHub repository")
 
         # Copy branch protection rules from the template repo
         # See copy_branch_protection() for why we don't use this currently
@@ -578,24 +610,63 @@ def refresh_scratch_org(scratch_org, *, originating_user_id):
 refresh_scratch_org_job = job(refresh_scratch_org)
 
 
-def get_unsaved_changes(scratch_org, *, originating_user_id):
-    try:
-        scratch_org.refresh_from_db()
-        old_revision_numbers = scratch_org.latest_revision_numbers
-        new_revision_numbers = get_latest_revision_numbers(
-            scratch_org, originating_user_id=originating_user_id
+def unsaved_changes(scratch_org, originating_user_id):
+    old_revision_numbers = scratch_org.latest_revision_numbers
+
+    new_revision_numbers = get_latest_revision_numbers(
+        scratch_org, originating_user_id=originating_user_id
+    )
+    unsaved_changes = compare_revisions(old_revision_numbers, new_revision_numbers)
+    scratch_org.unsaved_changes = unsaved_changes
+
+
+def nonsource_types(scratch_org):
+    user = scratch_org.owner
+    repo_id = scratch_org.parent.get_repo_id()
+    commit_ish = scratch_org.parent.branch_name
+
+    with local_github_checkout(user, repo_id, commit_ish) as repo_root:
+        scratch_org.valid_target_directories, _ = get_valid_target_directories(
+            user,
+            scratch_org,
+            repo_root,
         )
-        unsaved_changes = compare_revisions(old_revision_numbers, new_revision_numbers)
-        user = scratch_org.owner
-        repo_id = scratch_org.parent.get_repo_id()
-        commit_ish = scratch_org.parent.branch_name
-        with local_github_checkout(user, repo_id, commit_ish) as repo_root:
-            scratch_org.valid_target_directories, _ = get_valid_target_directories(
-                user,
-                scratch_org,
-                repo_root,
+    scratch_org.non_source_changes = {}
+    with dataset_env(scratch_org) as (
+        project_config,
+        org_config,
+        sf,
+        schema,
+        repo,
+    ):
+        try:
+            components = ListNonSourceTrackable(
+                org_config=org_config,
+                project_config=project_config,
+                task_config=TaskConfig({"options": {}}),
+            )()
+            for types in components:
+                scratch_org.non_source_changes[types] = []
+        except Exception as e:
+            logger.error(f"Error in listing non-source-trackable metadatatypes: {e}")
+
+
+def get_unsaved_changes(scratch_org, *, originating_user_id):
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            unsaved_changes_result = executor.submit(
+                unsaved_changes,
+                scratch_org=scratch_org,
+                originating_user_id=originating_user_id,
             )
-        scratch_org.unsaved_changes = unsaved_changes
+            nonsource_types_result = executor.submit(
+                nonsource_types, scratch_org=scratch_org
+            )
+            concurrent.futures.wait([unsaved_changes_result, nonsource_types_result])
+            unsaved_changes_result.result()
+            nonsource_types_result.result()
+
     except Exception as e:
         scratch_org.refresh_from_db()
         scratch_org.finalize_get_unsaved_changes(
@@ -611,6 +682,36 @@ def get_unsaved_changes(scratch_org, *, originating_user_id):
 
 
 get_unsaved_changes_job = job(get_unsaved_changes)
+
+
+def get_nonsource_components(*, scratch_org, desired_type, originating_user_id):
+    try:
+        scratch_org.refresh_from_db()
+        with dataset_env(scratch_org) as (project_config, org_config, sf, schema, repo):
+            components = ListComponents(
+                org_config=org_config,
+                project_config=project_config,
+                task_config=TaskConfig({"options": {"metadata_types": desired_type}}),
+            )()
+
+        scratch_org.non_source_changes[desired_type] = [
+            cmp["MemberName"] for cmp in components
+        ]
+    except Exception as e:
+        scratch_org.refresh_from_db()
+        scratch_org.finalize_get_nonsource_components(
+            error=e, originating_user_id=originating_user_id
+        )
+        tb = traceback.format_exc()
+        logger.error(tb)
+        raise
+    else:
+        scratch_org.finalize_get_nonsource_components(
+            originating_user_id=originating_user_id
+        )
+
+
+get_nonsource_components_job = job(get_nonsource_components)
 
 
 def commit_changes_from_org(
@@ -658,6 +759,10 @@ def commit_changes_from_org(
         latest_revision_numbers = get_latest_revision_numbers(
             scratch_org, originating_user_id=originating_user_id
         )
+        member_types = list(desired_changes.keys())
+        for member_type in member_types:
+            if member_type in scratch_org.non_source_changes:
+                del desired_changes[member_type]
         for member_type in desired_changes.keys():
             for member_name in desired_changes[member_type]:
                 try:

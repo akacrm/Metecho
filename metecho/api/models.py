@@ -11,7 +11,7 @@ from django.conf import settings
 from django.contrib.auth.models import AbstractUser
 from django.contrib.auth.models import UserManager as BaseUserManager
 from django.contrib.sites.models import Site
-from django.core.exceptions import ValidationError
+from django.core.exceptions import MultipleObjectsReturned, ValidationError
 from django.core.mail import send_mail
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import models, transaction
@@ -240,6 +240,9 @@ class User(PushMixin, HashIdMixin, AbstractUser):
             return self.github_account.get_avatar_url()
         except (AttributeError, KeyError, TypeError):
             return None
+        # if social app exists in both db and settings retrun sample url
+        except MultipleObjectsReturned:
+            return "https://example.com/avatar/"
 
     @property
     def org_id(self) -> Optional[str]:
@@ -716,8 +719,10 @@ class Epic(
         return self.name
 
     def save(self, *args, **kwargs):
+        if not self.id:
+            super().save(*args, **kwargs)
         self.update_status()
-        return super().save(*args, **kwargs)
+        return super().save()
 
     def subscribable_by(self, user):  # pragma: nocover
         return True
@@ -1238,6 +1243,9 @@ class ScratchOrg(
     unsaved_changes = models.JSONField(
         default=dict, encoder=DjangoJSONEncoder, blank=True
     )
+    non_source_changes = models.JSONField(
+        default=dict, encoder=DjangoJSONEncoder, blank=True
+    )
     ignored_changes = models.JSONField(
         default=dict, encoder=DjangoJSONEncoder, blank=True
     )
@@ -1480,6 +1488,32 @@ class ScratchOrg(
             self.notify_changed(originating_user_id=originating_user_id)
         else:
             self.unsaved_changes = {}
+            self.save()
+            self.notify_scratch_org_error(
+                error=error,
+                type_="SCRATCH_ORG_FETCH_CHANGES_FAILED",
+                originating_user_id=originating_user_id,
+            )
+
+    def queue_get_nonsource_components(self, *, originating_user_id, desired_type):
+        from .jobs import get_nonsource_components_job
+
+        self.currently_refreshing_changes = True
+        self.save()
+        self.notify_changed(originating_user_id=originating_user_id)
+        get_nonsource_components_job.delay(
+            scratch_org=self,
+            desired_type=desired_type,
+            originating_user_id=originating_user_id,
+        )
+
+    def finalize_get_nonsource_components(self, *, error=None, originating_user_id):
+        self.currently_refreshing_changes = False
+        if error is None:
+            self.save()
+            self.notify_changed(originating_user_id=originating_user_id)
+        else:
+            self.non_source_changes = {}
             self.save()
             self.notify_scratch_org_error(
                 error=error,

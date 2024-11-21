@@ -28,6 +28,7 @@ from ..jobs import (
     create_pr,
     create_repository,
     delete_scratch_org,
+    get_nonsource_components,
     get_social_image,
     get_unsaved_changes,
     parse_datasets,
@@ -475,20 +476,33 @@ def test_create_org_and_run_flow__no_setup_flow():
 
 
 @pytest.mark.django_db
-def test_get_unsaved_changes(scratch_org_factory):
+@pytest.mark.parametrize("ListNonSourceTrackable_exception", [False, True])
+def test_get_unsaved_changes(
+    scratch_org_factory, patch_dataset_env, ListNonSourceTrackable_exception
+):
     scratch_org = scratch_org_factory(
         latest_revision_numbers={"TypeOne": {"NameOne": 10}}
     )
     with ExitStack() as stack:
+        project_config, org_config, sf, schema, repo = patch_dataset_env
         stack.enter_context(patch(f"{PATCH_ROOT}.local_github_checkout"))
         stack.enter_context(patch("metecho.api.sf_org_changes.get_repo_info"))
         get_valid_target_directories = stack.enter_context(
             patch(f"{PATCH_ROOT}.get_valid_target_directories")
         )
+        ListNonSourceTrackable = stack.enter_context(
+            patch(f"{PATCH_ROOT}.ListNonSourceTrackable")
+        )
         get_valid_target_directories.return_value = (
             {"source": ["src"], "config": [], "post": [], "pre": []},
             False,
         )
+        if ListNonSourceTrackable_exception:
+            ListNonSourceTrackable.return_value = MagicMock(side_effect=Exception)
+        else:
+            ListNonSourceTrackable.return_value = MagicMock(
+                return_value=["TypeThree", "TypeFour"]
+            )
         get_latest_revision_numbers = stack.enter_context(
             patch(f"{PATCH_ROOT}.get_latest_revision_numbers")
         )
@@ -504,7 +518,62 @@ def test_get_unsaved_changes(scratch_org_factory):
             "TypeOne": ["NameOne"],
             "TypeTwo": ["NameTwo"],
         }
+        if ListNonSourceTrackable_exception:
+            assert scratch_org.non_source_changes == {}
+        else:
+            assert scratch_org.non_source_changes == {
+                "TypeThree": [],
+                "TypeFour": [],
+            }
         assert scratch_org.latest_revision_numbers == {"TypeOne": {"NameOne": 10}}
+
+
+@pytest.mark.django_db
+class TestNonSourceComponents:
+    def test_get_nonsource_components(self, scratch_org_factory, patch_dataset_env):
+        scratch_org = scratch_org_factory(
+            non_source_changes={"TypeOne": [], "TypeTwo": []}
+        )
+        with ExitStack() as stack:
+            project_config, org_config, sf, schema, repo = patch_dataset_env
+            ListComponents = stack.enter_context(patch(f"{PATCH_ROOT}.ListComponents"))
+            ListComponents.return_value = MagicMock(
+                return_value=[
+                    {"MemberType": "TypeOne", "MemberName": "ListOne"},
+                    {"MemberType": "TypeOne", "MemberName": "ListTwo"},
+                ]
+            )
+            get_nonsource_components(
+                scratch_org=scratch_org,
+                originating_user_id=None,
+                desired_type="TypeOne",
+            )
+            scratch_org.refresh_from_db()
+            assert scratch_org.non_source_changes == {
+                "TypeOne": ["ListOne", "ListTwo"],
+                "TypeTwo": [],
+            }
+            assert ListComponents.called
+
+    def test_get_nonsource_components_fail(
+        self, caplog, scratch_org_factory, patch_dataset_env, task_factory
+    ):
+        scratch_org = scratch_org_factory(
+            non_source_changes={"TypeOne": [], "TypeTwo": []}
+        )
+        with ExitStack() as stack:
+            project_config, org_config, sf, schema, repo = patch_dataset_env
+            ListComponents = stack.enter_context(patch(f"{PATCH_ROOT}.ListComponents"))
+            ListComponents.side_effect = MagicMock(side_effect=Exception("Not valid!!"))
+            with pytest.raises(Exception):
+                get_nonsource_components(
+                    scratch_org=scratch_org,
+                    originating_user_id=None,
+                    desired_type="TypeOne",
+                )
+            scratch_org.refresh_from_db()
+            assert ListComponents.called
+            assert "Not valid!!" in caplog.text
 
 
 def test_create_branches_on_github_then_create_scratch_org():
@@ -743,7 +812,9 @@ class TestRefreshGitHubOrganizationsForUser:
 
 @pytest.mark.django_db
 def test_commit_changes_from_org(scratch_org_factory, user_factory):
-    scratch_org = scratch_org_factory()
+    scratch_org = scratch_org_factory(
+        non_source_changes={"nonsource": ["typeone", "typetwo"]}
+    )
     user = user_factory()
     with ExitStack() as stack:
         commit_changes_to_github = stack.enter_context(
@@ -766,7 +837,7 @@ def test_commit_changes_from_org(scratch_org_factory, user_factory):
         repository.branch.return_value = MagicMock(commit=commit)
         get_repo_info.return_value = repository
 
-        desired_changes = {"name": ["member"]}
+        desired_changes = {"name": ["member"], "nonsource": ["typeone"]}
         commit_message = "test message"
         target_directory = "src"
         assert scratch_org.latest_revision_numbers == {}
@@ -854,7 +925,7 @@ class TestErrorHandling:
 @pytest.mark.django_db
 class TestRefreshCommits:
     def test_refreshes_commits(self, project_factory, epic_factory, task_factory):
-        project = project_factory(repo_id=123, branch_name="project")
+        project = project_factory(repo_id=789, branch_name="project")
         epic = epic_factory(project=project, branch_name="epic")
         task = task_factory(epic=epic, branch_name="task", origin_sha="1234abcd")
         with ExitStack() as stack:
@@ -1378,11 +1449,13 @@ class TestCreateRepository:
         gh_user.organizations.return_value = [
             mocker.MagicMock(login=project.repo_owner, spec=Organization)
         ]
-        gh_org = mocker.patch(
-            f"{PATCH_ROOT}.gh_as_org", autospec=True
-        ).return_value.organization.return_value
-        gh_org.create_team.return_value = team
-        gh_org.create_repository.return_value = repo
+        gh_org = mocker.patch(f"{PATCH_ROOT}.gh_as_org", autospec=True).return_value
+        tpl_repo = gh_org.repository.return_value
+        tpl_repo.owner = "Industries-SolutionFactory-Connect"
+        tpl_repo.name = "TemplateRepoTest"
+        gh_org_org = gh_org.organization.return_value
+        gh_org_org.create_team.return_value = team
+        gh_org_org.create_repository.return_value = repo
 
         get_devhub_api = mocker.patch(f"{PATCH_ROOT}.get_devhub_api", autospec=True)
         get_devhub_api.sf_instance = "foo"
@@ -1391,7 +1464,7 @@ class TestCreateRepository:
         # Wild API version so we can easily detect it came from here
         requests.get.return_value.json.return_value = [{"version": "600.0"}]
 
-        return project, gh_org, team, repo, get_devhub_api, requests
+        return project, gh_org_org, team, repo, get_devhub_api, requests
 
     def test_ok(self, mocker, github_mocks, user_factory):
         user = user_factory()
@@ -1400,14 +1473,13 @@ class TestCreateRepository:
         sarge = mocker.patch(f"{PATCH_ROOT}.sarge", autospec=True)
         sarge.capture_both.return_value.returncode = 0
         async_to_sync = mocker.patch("metecho.api.model_mixins.async_to_sync")
-        zipfile = mocker.patch(f"{PATCH_ROOT}.download_extract_github").return_value
-
+        # zipfile = mocker.patch(f"{PATCH_ROOT}.download_extract_github").return_value
         create_repository(
             project,
             user=user,
             dependencies=["http://foo.com"],
-            template_repo_owner="owner",
-            template_repo_name="repo",
+            template_repo_owner=None,
+            template_repo_name=None,
         )
         project.refresh_from_db()
 
@@ -1426,26 +1498,30 @@ class TestCreateRepository:
             include_user=False,
         )
         assert sarge.capture_both.called
-        assert zipfile.extractall.called
+        # assert zipfile.extractall.called
         assert init_from_context.call_args_list[0][0][0]["api_version"] == "600.0"
 
     def test_ok__no_version_from_devhub(self, mocker, github_mocks, user_factory):
         user = user_factory()
         project, org, team, repo, get_devhub_api, requests = github_mocks
         get_devhub_api.side_effect = Exception
-        init_from_context = mocker.patch(f"{PATCH_ROOT}.init_from_context")
+        # init_from_context = mocker.patch(f"{PATCH_ROOT}.init_from_context")
         sarge = mocker.patch(f"{PATCH_ROOT}.sarge", autospec=True)
         sarge.capture_both.return_value.returncode = 0
         async_to_sync = mocker.patch("metecho.api.model_mixins.async_to_sync")
-        zipfile = mocker.patch(f"{PATCH_ROOT}.download_extract_github").return_value
-
-        create_repository(
-            project,
-            user=user,
-            dependencies=["http://foo.com"],
-            template_repo_owner="owner",
-            template_repo_name="repo",
-        )
+        # zipfile = mocker.patch(f"{PATCH_ROOT}.download_extract_github").return_value
+        with patch("requests.post") as mock_post:
+            response = mocker.patch(f"{PATCH_ROOT}.requests.post").return_value
+            response.status_code = 201
+            response.json.return_value = {"full_name": "value", "id": 123456}
+            mock_post.return_value = response
+            create_repository(
+                project,
+                user=user,
+                dependencies=["http://foo.com"],
+                template_repo_owner="Industries-SolutionFactory-Connect",
+                template_repo_name="TemplateRepoTest",
+            )
         project.refresh_from_db()
 
         assert project.repo_id == 123456
@@ -1462,9 +1538,53 @@ class TestCreateRepository:
             group_name=None,
             include_user=False,
         )
-        assert sarge.capture_both.called
-        assert zipfile.extractall.called
-        assert init_from_context.call_args_list[0][0][0]["api_version"] != "600.0"
+        # assert sarge.capture_both.called
+        # assert zipfile.extractall.called
+        # assert init_from_context.call_args_list[0][0][0]["api_version"] != "600.0"
+
+    def test_ok__exception_from_template(self, mocker, github_mocks, user_factory):
+        user = user_factory()
+        project, org, team, repo, get_devhub_api, requests = github_mocks
+        get_devhub_api.side_effect = Exception
+        sarge = mocker.patch(f"{PATCH_ROOT}.sarge", autospec=True)
+        sarge.capture_both.return_value.returncode = 0
+
+        with patch(f"{PATCH_ROOT}.Exception") as mock_exception:
+            mock_exception.side_effect = Exception(
+                "Create Repository using Template failed"
+            )
+
+        with patch("requests.post") as mock_post:
+            response = mocker.patch(f"{PATCH_ROOT}.requests.post").return_value
+            response.status_code = 404
+            response.json.return_value = {"full_name": "value", "id": 123456}
+            mock_post.return_value = response
+        with pytest.raises(Exception, match="Create Repository using Template failed"):
+            create_repository(
+                project,
+                user=user,
+                dependencies=["http://foo.com"],
+                template_repo_owner="dummy1",
+                template_repo_name="dummy2",
+            )
+
+    def test_ok__exception_from_repo(self, mocker, github_mocks, user_factory):
+        user = user_factory()
+        project, org, team, repo, get_devhub_api, requests = github_mocks
+        get_devhub_api.side_effect = Exception
+        init_from_context = mocker.patch(f"{PATCH_ROOT}.init_from_context")
+        sarge = mocker.patch(f"{PATCH_ROOT}.sarge", autospec=True)
+        sarge.capture_both.return_value.returncode = 0
+
+        with patch(f"{PATCH_ROOT}"):
+            create_repository(
+                project,
+                user=user,
+                dependencies=["http://foo.com"],
+                template_repo_owner=None,
+                template_repo_name=None,
+            )
+            assert init_from_context.call_args_list[0][0][0]["api_version"] != "600.0"
 
     def test__gh_error(self, mocker, caplog, project, user_factory, github_mocks):
         user = user_factory()
@@ -1507,7 +1627,7 @@ class TestCreateRepository:
         sarge = mocker.patch(f"{PATCH_ROOT}.sarge", autospec=True)
         sarge.capture_both.return_value.returncode = 0
         mocker.patch("metecho.api.model_mixins.async_to_sync")
-        mocker.patch(f"{PATCH_ROOT}.download_extract_github").return_value
+        # mocker.patch(f"{PATCH_ROOT}.download_extract_github").return_value
 
         create_repository(project, user=user, dependencies=[])
 

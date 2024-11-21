@@ -121,6 +121,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "metecho.logging_middleware.LoggingMiddleware",
     "sfdo_template_helpers.admin.middleware.AdminRestrictMiddleware",
+    "allauth.account.middleware.AccountMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -499,3 +500,6 @@ if SENTRY_DSN:
         dsn=SENTRY_DSN,
         integrations=[DjangoIntegration(), RedisIntegration(), RqIntegration()],
     )
+
+# create private repo
+ENABLE_CREATE_PRIVATE_REPO = env.bool("ENABLE_CREATE_PRIVATE_REPO", default=False)

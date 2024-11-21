@@ -52,7 +52,7 @@ const defaultOrgs = {
     owner: sampleUser1.id,
     owner_gh_username: sampleGitHubUser1.username,
     owner_gh_id: sampleGitHubUser1.id,
-    expires_at: '2019-09-16T12:58:53.721Z',
+    expires_at: new Date(new Date().getTime() + 86400000).toISOString(),
     latest_commit: '617a512-longlong',
     latest_commit_url: '/test/commit/url/',
     latest_commit_at: '2019-08-16T12:58:53.721Z',
@@ -187,11 +187,29 @@ describe('<TaskOrgCards/>', () => {
           has_ignored_changes: true,
           total_ignored_changes: 1,
           ignored_changes: { Foo: ['Bar'] },
+          non_source_changes: {},
         },
       };
       const { getByText } = setup({ orgs });
 
       expect(getByText('1 ignored')).toBeVisible();
+    });
+  });
+
+  describe('org has ignored nonsource changes', () => {
+    test('renders card status', () => {
+      const orgs = {
+        ...defaultOrgs,
+        Dev: {
+          ...defaultOrgs.Dev,
+          has_ignored_changes: true,
+          total_ignored_changes: 1,
+          ignored_changes: { Apple: ['Bars'] },
+          non_source_changes: { Apple: ['Bars'] },
+        },
+      };
+      const { getByText } = setup({ orgs });
+      expect(getByText('1 unretrieved change', { exact: false })).toBeVisible();
     });
   });
 
@@ -913,7 +931,28 @@ describe('<TaskOrgCards/>', () => {
         expect(args.object.id).toBe('org-id');
       });
     });
+    test('checks  and then deletes  expired org', async () => {
+      const { findByText } = setup({
+        orgs: {
+          ...defaultOrgs,
+          Dev: {
+            ...defaultOrgs.Dev,
+            expires_at: new Date().toISOString(),
+            unsaved_changes: {},
+            total_unsaved_changes: 0,
+            has_unsaved_changes: false,
+          },
+        },
+      });
+      await findByText('Deleting Org…');
+      expect.assertions(3);
+      expect(deleteObject).toHaveBeenCalledTimes(1);
 
+      const deleteArgs = deleteObject.mock.calls[0][0];
+
+      expect(deleteArgs.objectType).toBe('scratch_org');
+      expect(deleteArgs.object.id).toBe('org-id');
+    });
     describe('Dev org', () => {
       test('refreshes and then deletes org', async () => {
         const { findByText, getByText } = setup({
